@@ -1,0 +1,190 @@
+#include <furi.h>
+#include <furi_hal_bt.h>
+#include <gui/gui.h>
+#include <notification/notification_messages.h>
+
+typedef enum {
+    MainMenuOptionConnect,
+    MainMenuOptionDisconnect,
+    MainMenuOptionExit,
+} MainMenuOption;
+
+typedef struct {
+    bool exit;
+    FuriMessageQueue* event_queue;
+    FuriMutex* mutex;
+    FuriHalBtDeviceList* device_list;
+    FuriHalBtDevice connected_device;
+    size_t selected_index;
+    MainMenuOption selected_menu_option;
+} AppState;
+
+// Input callback function
+static void input_callback(InputEvent* input_event, FuriMessageQueue* event_queue) {
+    furi_message_queue_put(event_queue, input_event, FuriWaitForever);
+}
+
+// Display the main menu
+void display_main_menu(AppState* app_state, Gui* gui) {
+    const char* menu_options[] = {
+        "1. Connect to Device",
+        "2. Disconnect Current Device",
+        "3. Exit",
+    };
+
+    gui_clear(gui);
+    for (size_t i = 0; i < sizeof(menu_options) / sizeof(menu_options[0]); i++) {
+        if (i == app_state->selected_menu_option) {
+            gui_draw_text(gui, 5, 10 + i * 12, FontPrimary, "> ");
+        } else {
+            gui_draw_text(gui, 5, 10 + i * 12, FontPrimary, "  ");
+        }
+        gui_draw_text(gui, 20, 10 + i * 12, FontPrimary, menu_options[i]);
+    }
+    gui_update(gui);
+}
+
+// Scan for Bluetooth devices
+void scan_bluetooth_devices(AppState* app_state, Gui* gui) {
+    gui_clear(gui);
+    FuriString* display_text = furi_string_alloc();
+
+    // Start scanning for devices
+    app_state->device_list = furi_hal_bt_scan_start();
+    furi_hal_bt_scan_stop();
+
+    if (app_state->device_list->size > 0) {
+        for (size_t i = 0; i < app_state->device_list->size; i++) {
+            FuriHalBtDevice* device = &app_state->device_list->devices[i];
+            furi_string_printf(display_text, "%zu. %s (RSSI: %d)", i + 1, device->name, device->rssi);
+            gui_draw_text(gui, 5, 10 + i * 12, FontPrimary, furi_string_get_cstr(display_text));
+        }
+    } else {
+        gui_draw_text_center(gui, "No devices found!", FontPrimary, true);
+    }
+
+    furi_string_free(display_text);
+    gui_update(gui);
+}
+
+// Connect to the selected device
+void connect_bluetooth_device(AppState* app_state, Gui* gui) {
+    gui_clear(gui);
+
+    if (app_state->selected_index < app_state->device_list->size) {
+        FuriHalBtDevice* selected_device = &app_state->device_list->devices[app_state->selected_index];
+        gui_draw_text_center(gui, "Connecting...", FontPrimary, true);
+        gui_update(gui);
+
+        // Attempt to connect
+        FuriHalBtConnectionStatus connection_status = furi_hal_bt_connect(selected_device->address);
+        if (connection_status == FuriHalBtConnectionStatus_Connected) {
+            // Save connected device details
+            app_state->connected_device = *selected_device;
+
+            gui_draw_text_center(gui, "Connected successfully!", FontPrimary, true);
+            gui_update(gui);
+
+            // Set connection to persist even after app exits
+            furi_hal_bt_set_persistent_connection(true);
+        } else {
+            gui_draw_text_center(gui, "Connection failed!", FontPrimary, true);
+            gui_update(gui);
+        }
+    } else {
+        gui_draw_text_center(gui, "Invalid selection!", FontPrimary, true);
+        gui_update(gui);
+    }
+}
+
+// Disconnect from the current device
+void disconnect_bluetooth_device(AppState* app_state, Gui* gui) {
+    gui_clear(gui);
+    if (furi_hal_bt_is_connected()) {
+        furi_hal_bt_disconnect();
+        gui_draw_text_center(gui, "Disconnected successfully.", FontPrimary, true);
+    } else {
+        gui_draw_text_center(gui, "No device connected to disconnect.", FontPrimary, true);
+    }
+    gui_update(gui);
+}
+
+// Handle menu selection and actions
+void handle_menu_selection(AppState* app_state, Gui* gui) {
+    switch (app_state->selected_menu_option) {
+        case MainMenuOptionConnect:
+            // Display available devices and connect
+            scan_bluetooth_devices(app_state, gui);
+            connect_bluetooth_device(app_state, gui);
+            break;
+
+        case MainMenuOptionDisconnect:
+            // Disconnect from the current device
+            disconnect_bluetooth_device(app_state, gui);
+            break;
+
+        case MainMenuOptionExit:
+            // Exit the app
+            app_state->exit = true;
+            break;
+    }
+}
+
+// Main application logic
+int32_t bluetooth_connection_app(void* p) {
+    AppState app_state = {
+        .exit = false,
+        .event_queue = furi_message_queue_alloc(8, sizeof(InputEvent)),
+        .mutex = furi_mutex_alloc(FuriMutexTypeNormal),
+        .device_list = NULL,
+        .connected_device = {0},
+        .selected_index = 0,
+        .selected_menu_option = MainMenuOptionConnect,
+    };
+
+    Gui* gui = furi_record_open(RECORD_GUI);
+    NotificationApp* notification = furi_record_open(RECORD_NOTIFICATION);
+
+    gui_add_input_callback(gui, (GuiInputCallback)input_callback, app_state.event_queue);
+
+    // Main application loop
+    while (!app_state.exit) {
+        InputEvent input_event;
+        if (furi_message_queue_get(app_state.event_queue, &input_event, FuriWaitForever) == FuriStatusOk) {
+            if (input_event.type == InputTypePress) {
+                switch (input_event.key) {
+                    case InputKeyUp:
+                        app_state.selected_menu_option = (app_state.selected_menu_option == 0)
+                            ? MainMenuOptionExit
+                            : app_state.selected_menu_option - 1;
+                        break;
+
+                    case InputKeyDown:
+                        app_state.selected_menu_option = (app_state.selected_menu_option + 1) 
+                            % (MainMenuOptionExit + 1);
+                        break;
+
+                    case InputKeyOk:
+                        handle_menu_selection(&app_state, gui);
+                        break;
+
+                    case InputKeyBack:
+                        app_state.exit = true;
+                        break;
+                }
+            }
+        }
+
+        // Display main menu
+        display_main_menu(&app_state, gui);
+    }
+
+    // Clean up resources
+    furi_message_queue_free(app_state.event_queue);
+    furi_mutex_free(app_state.mutex);
+    if (app_state.device_list) furi_hal_bt_scan_free(app_state.device_list);
+    furi_record_close(RECORD_GUI);
+    furi_record_close(RECORD_NOTIFICATION);
+
+    return 0;
+}
