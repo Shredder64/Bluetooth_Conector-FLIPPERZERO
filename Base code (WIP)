@@ -4,19 +4,19 @@
 #include <notification/notification_messages.h>
 
 typedef enum {
-    MainMenuOptionConnect,
-    MainMenuOptionDisconnect,
-    MainMenuOptionExit,
-} MainMenuOption;
+    MenuOptionScanAndPair,
+    MenuOptionDisconnect,
+    MenuOptionShowConnected,
+    MenuOptionExit,
+} MenuOption;
 
 typedef struct {
     bool exit;
     FuriMessageQueue* event_queue;
-    FuriMutex* mutex;
     FuriHalBtDeviceList* device_list;
     FuriHalBtDevice connected_device;
     size_t selected_index;
-    MainMenuOption selected_menu_option;
+    MenuOption selected_menu_option;
 } AppState;
 
 // Input callback function
@@ -27,9 +27,10 @@ static void input_callback(InputEvent* input_event, FuriMessageQueue* event_queu
 // Display the main menu
 void display_main_menu(AppState* app_state, Gui* gui) {
     const char* menu_options[] = {
-        "1. Connect to Device",
-        "2. Disconnect Current Device",
-        "3. Exit",
+        "1. Scan & Pair",
+        "2. Disconnect",
+        "3. Show Connected Device",
+        "4. Exit",
     };
 
     gui_clear(gui);
@@ -67,28 +68,30 @@ void scan_bluetooth_devices(AppState* app_state, Gui* gui) {
     gui_update(gui);
 }
 
-// Connect to the selected device
-void connect_bluetooth_device(AppState* app_state, Gui* gui) {
+// Pair with a selected device using the HID profile
+void pair_bluetooth_device(AppState* app_state, Gui* gui) {
     gui_clear(gui);
 
     if (app_state->selected_index < app_state->device_list->size) {
         FuriHalBtDevice* selected_device = &app_state->device_list->devices[app_state->selected_index];
-        gui_draw_text_center(gui, "Connecting...", FontPrimary, true);
+        gui_draw_text_center(gui, "Pairing with device...", FontPrimary, true);
         gui_update(gui);
 
-        // Attempt to connect
-        FuriHalBtConnectionStatus connection_status = furi_hal_bt_connect(selected_device->address);
+        // Attempt to pair with the device using the HID profile
+        FuriHalBtConnectionStatus connection_status = furi_hal_bt_pair_device_with_profile(
+            selected_device->address, FuriHalBtProfile_HID);
+
         if (connection_status == FuriHalBtConnectionStatus_Connected) {
             // Save connected device details
             app_state->connected_device = *selected_device;
 
-            gui_draw_text_center(gui, "Connected successfully!", FontPrimary, true);
+            gui_draw_text_center(gui, "Paired successfully!", FontPrimary, true);
             gui_update(gui);
 
-            // Set connection to persist even after app exits
+            // Set persistent connection so BadKB can use it
             furi_hal_bt_set_persistent_connection(true);
         } else {
-            gui_draw_text_center(gui, "Connection failed!", FontPrimary, true);
+            gui_draw_text_center(gui, "Pairing failed!", FontPrimary, true);
             gui_update(gui);
         }
     } else {
@@ -97,7 +100,7 @@ void connect_bluetooth_device(AppState* app_state, Gui* gui) {
     }
 }
 
-// Disconnect from the current device
+// Disconnect the currently connected device
 void disconnect_bluetooth_device(AppState* app_state, Gui* gui) {
     gui_clear(gui);
     if (furi_hal_bt_is_connected()) {
@@ -109,22 +112,35 @@ void disconnect_bluetooth_device(AppState* app_state, Gui* gui) {
     gui_update(gui);
 }
 
-// Handle menu selection and actions
+// Display the currently connected device
+void show_connected_device(AppState* app_state, Gui* gui) {
+    gui_clear(gui);
+    if (furi_hal_bt_is_connected()) {
+        gui_draw_text_center(gui, "Connected to:", FontPrimary, false);
+        gui_draw_text_center(gui, app_state->connected_device.name, FontPrimary, true);
+    } else {
+        gui_draw_text_center(gui, "No device connected.", FontPrimary, true);
+    }
+    gui_update(gui);
+}
+
+// Handle menu selection
 void handle_menu_selection(AppState* app_state, Gui* gui) {
     switch (app_state->selected_menu_option) {
-        case MainMenuOptionConnect:
-            // Display available devices and connect
+        case MenuOptionScanAndPair:
             scan_bluetooth_devices(app_state, gui);
-            connect_bluetooth_device(app_state, gui);
+            pair_bluetooth_device(app_state, gui);
             break;
 
-        case MainMenuOptionDisconnect:
-            // Disconnect from the current device
+        case MenuOptionDisconnect:
             disconnect_bluetooth_device(app_state, gui);
             break;
 
-        case MainMenuOptionExit:
-            // Exit the app
+        case MenuOptionShowConnected:
+            show_connected_device(app_state, gui);
+            break;
+
+        case MenuOptionExit:
             app_state->exit = true;
             break;
     }
@@ -135,11 +151,10 @@ int32_t bluetooth_connection_app(void* p) {
     AppState app_state = {
         .exit = false,
         .event_queue = furi_message_queue_alloc(8, sizeof(InputEvent)),
-        .mutex = furi_mutex_alloc(FuriMutexTypeNormal),
         .device_list = NULL,
         .connected_device = {0},
         .selected_index = 0,
-        .selected_menu_option = MainMenuOptionConnect,
+        .selected_menu_option = MenuOptionScanAndPair,
     };
 
     Gui* gui = furi_record_open(RECORD_GUI);
@@ -155,13 +170,13 @@ int32_t bluetooth_connection_app(void* p) {
                 switch (input_event.key) {
                     case InputKeyUp:
                         app_state.selected_menu_option = (app_state.selected_menu_option == 0)
-                            ? MainMenuOptionExit
+                            ? MenuOptionExit
                             : app_state.selected_menu_option - 1;
                         break;
 
                     case InputKeyDown:
                         app_state.selected_menu_option = (app_state.selected_menu_option + 1) 
-                            % (MainMenuOptionExit + 1);
+                            % (MenuOptionExit + 1);
                         break;
 
                     case InputKeyOk:
@@ -181,7 +196,6 @@ int32_t bluetooth_connection_app(void* p) {
 
     // Clean up resources
     furi_message_queue_free(app_state.event_queue);
-    furi_mutex_free(app_state.mutex);
     if (app_state.device_list) furi_hal_bt_scan_free(app_state.device_list);
     furi_record_close(RECORD_GUI);
     furi_record_close(RECORD_NOTIFICATION);
